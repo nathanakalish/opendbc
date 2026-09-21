@@ -1,5 +1,5 @@
 from opendbc.car import structs
-from opendbc.car.subaru.values import CanBus
+from opendbc.car.subaru.values import CanBus, CarControllerParams
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 
@@ -67,7 +67,9 @@ def create_es_distance(packer, frame, es_distance_msg, bus, pcm_cancel_cmd, long
   return packer.make_can_msg("ES_Distance", bus, values)
 
 
-def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert, left_line, right_line, left_lane_depart, right_lane_depart):
+def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, lat_active, cruise_available, dash_indicators,
+                         long_active, standstill, visual_alert, left_line, right_line,
+                         left_lane_depart, right_lane_depart):
   values = {s: es_lkas_state_msg[s] for s in [
     "CHECKSUM",
     "LKAS_Alert_Msg",
@@ -104,6 +106,14 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
   if values["LKAS_Alert"] == 30:
     values["LKAS_Alert"] = 0
 
+  # The camera runs its own ACC state machine and will not hold at a standstill for more than a
+  # few seconds before beeping for the driver to take the brake. openpilot holds on brake pressure
+  # for as long as it needs to, so the demand is spurious: it fired 2 s after standstill and
+  # toggled three times in one second, which is what the driver heard. Gated on the hold, so an
+  # Audio_Beep raised for any other reason still reaches the driver.
+  if values["LKAS_Alert"] == 24 and long_active and standstill:
+    values["LKAS_Alert"] = 0
+
   # Filter the stock LKAS sending "Keep hands on wheel OFF" alert (2020+ models)
   if values["LKAS_Alert_Msg"] == 7:
     values["LKAS_Alert_Msg"] = 0
@@ -119,19 +129,37 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, visual_alert
     elif right_lane_depart:
       values["LKAS_Alert"] = 11  # Right lane departure dash alert
 
+  # Obstacle Detected, flashing red with repeated beeps. After the ldw branch so a collision
+  # warning wins, and on the cluster because ES_Infotainment only reaches the head unit.
+  if dash_indicators and visual_alert == VisualAlert.fcw:
+    values["LKAS_Alert"] = 2
+
   if enabled:
     values["LKAS_ACTIVE"] = 1  # Show LKAS lane lines
-    values["LKAS_Dash_State"] = 2  # Green enabled indicator
-  else:
-    values["LKAS_Dash_State"] = 0  # LKAS Not enabled
+    if dash_indicators:
+      # The cluster draws no line at all unless Enable is set, and stock holds it at 0 the whole
+      # time openpilot is steering, so the colour below never reaches the screen without this.
+      values["LKAS_Left_Line_Enable"] = 1
+      values["LKAS_Right_Line_Enable"] = 1
 
-  values["LKAS_Left_Line_Visible"] = int(left_line)
-  values["LKAS_Right_Line_Visible"] = int(right_line)
+  if dash_indicators:
+    # 2 = green, 1 = white, 0 = off. White whenever cruise is available but openpilot is not
+    # steering, mirroring Cruise_Disengaged_Dash, so the two indicators agree.
+    values["LKAS_Dash_State"] = 2 if lat_active else 1 if cruise_available else 0
+    # 0 = grey, 1 = white, 2 = green. Green only while actually steering, as nissan does.
+    line_color = 2 if lat_active else 1 if enabled else 0
+    values["LKAS_Left_Line_Visible"] = line_color if left_line else 0
+    values["LKAS_Right_Line_Visible"] = line_color if right_line else 0
+  else:
+    values["LKAS_Dash_State"] = 2 if enabled else 0
+    values["LKAS_Left_Line_Visible"] = int(left_line)
+    values["LKAS_Right_Line_Visible"] = int(right_line)
 
   return packer.make_can_msg("ES_LKAS_State", CanBus.main, values)
 
 
-def create_es_dashstatus(packer, frame, dashstatus_msg, enabled, long_enabled, long_active, lead_visible):
+def create_es_dashstatus(packer, frame, dashstatus_msg, enabled, long_enabled, long_active, dash_indicators,
+                         lead_visible, distance_bars, brake_value, brake_pressed, standstill):
   values = {s: dashstatus_msg[s] for s in [
     "CHECKSUM",
     "PCB_Off",
@@ -164,15 +192,37 @@ def create_es_dashstatus(packer, frame, dashstatus_msg, enabled, long_enabled, l
   values["COUNTER"] = frame % 0x10
 
   if long_enabled:
-    values["Cruise_State"] = 0
-    # TODO: Cruise_Activated_dash should respect gas pressed and standstill stock behavior
-    values["Cruise_Activated_Dash"] = enabled
-    values["Cruise_Disengaged_Dash"] = 0
     values["Car_Follow"] = int(lead_visible)
 
     values["PCB_Off"] = 1 # AEB is not preserved, so show the PCB_Off on dash
     values["LDW_Off"] = 0
     values["Cruise_Fault"] = 0
+
+    if dash_indicators:
+      # Bitfield: bit0 is HOLD. 3 would add READY, which the cluster renders as "Ready Hold".
+      values["Cruise_State"] = 1 if (long_active and standstill) else 0
+      # Green while openpilot has the gas and brakes, white whenever cruise main is on but it
+      # does not, which covers the gas override.
+      values["Cruise_Activated_Dash"] = int(long_active)
+      values["Cruise_Disengaged_Dash"] = int(values["Cruise_On"] and not long_active)
+
+      # Cluster follow-distance bars, the stock personality readout. 1-4, 0 blanks them.
+      values["Cruise_Distance"] = distance_bars
+
+      # Draws the brake lights on the car image, on both the cluster and the MFD. Stock only
+      # reports the driver's own braking about two thirds of the time, so OR it in directly.
+      values["Brake_Lights"] = int(values["Brake_Lights"] or brake_pressed or
+                                   brake_value >= CarControllerParams.BRAKE_LIGHTS_THRESHOLD)
+
+      # Both latch: after ~5s the crossed-out EyeSight mark replaces the lead car and the
+      # distance bars, which openpilot now owns.
+      values["Cruise_Soft_Disable"] = 0
+      values["Cruise_Status_Msg"] = 0
+    else:
+      values["Cruise_State"] = 0
+      # TODO: Cruise_Activated_dash should respect gas pressed and standstill stock behavior
+      values["Cruise_Activated_Dash"] = enabled
+      values["Cruise_Disengaged_Dash"] = 0
 
   # Filter stock LKAS disabled and Keep hands on steering wheel OFF alerts
   if values["LKAS_State_Msg"] in (2, 3):
@@ -181,7 +231,7 @@ def create_es_dashstatus(packer, frame, dashstatus_msg, enabled, long_enabled, l
   return packer.make_can_msg("ES_DashStatus", CanBus.main, values)
 
 
-def create_es_brake(packer, frame, es_brake_msg, long_enabled, long_active, brake_value):
+def create_es_brake(packer, frame, es_brake_msg, bus, long_enabled, long_active, brake_value):
   values = {s: es_brake_msg[s] for s in [
     "CHECKSUM",
     "Signal1",
@@ -197,18 +247,21 @@ def create_es_brake(packer, frame, es_brake_msg, long_enabled, long_active, brak
   values["COUNTER"] = frame % 0x10
 
   if long_enabled:
+    # openpilot sends the only ES_Brake the brake ECU sees, so forwarding the camera's AEB
+    # status alongside our own Brake_Pressure would emit a frame stock never produces.
+    values["AEB_Status"] = 0
     values["Cruise_Brake_Fault"] = 0
     values["Cruise_Activated"] = long_active
 
     values["Brake_Pressure"] = brake_value
 
     values["Cruise_Brake_Active"] = brake_value > 0
-    values["Cruise_Brake_Lights"] = brake_value >= 70
+    values["Cruise_Brake_Lights"] = brake_value >= CarControllerParams.BRAKE_LIGHTS_THRESHOLD
 
-  return packer.make_can_msg("ES_Brake", CanBus.main, values)
+  return packer.make_can_msg("ES_Brake", bus, values)
 
 
-def create_es_status(packer, frame, es_status_msg, long_enabled, long_active, cruise_rpm):
+def create_es_status(packer, frame, es_status_msg, bus, long_enabled, long_active, cruise_rpm):
   values = {s: es_status_msg[s] for s in [
     "CHECKSUM",
     "Signal1",
@@ -228,7 +281,7 @@ def create_es_status(packer, frame, es_status_msg, long_enabled, long_active, cr
 
     values["Cruise_Activated"] = long_active
 
-  return packer.make_can_msg("ES_Status", CanBus.main, values)
+  return packer.make_can_msg("ES_Status", bus, values)
 
 
 def create_es_infotainment(packer, frame, es_infotainment_msg, visual_alert):

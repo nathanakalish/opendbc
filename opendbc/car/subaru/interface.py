@@ -3,7 +3,8 @@ from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.subaru.carcontroller import CarController
 from opendbc.car.subaru.carstate import CarState
-from opendbc.car.subaru.values import CAR, GLOBAL_ES_ADDR, SubaruFlags, SubaruSafetyFlags
+from opendbc.car.subaru.values import CAR, CarControllerParams, GLOBAL_ES_ADDR, SubaruFlags, \
+                                      SubaruSafetyFlags, long_tune
 
 
 class CarInterface(CarInterfaceBase):
@@ -61,7 +62,12 @@ class CarInterface(CarInterfaceBase):
       ret.lateralTuning.init('pid')
       ret.lateralTuning.pid.kf = 0.00005
       ret.lateralTuning.pid.kiBP, ret.lateralTuning.pid.kpBP = [[0., 14., 23.], [0., 14., 23.]]
-      ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.045, 0.042, 0.20], [0.04, 0.035, 0.045]]
+      # kpV raised at low speed and made monotonic
+      # before quadrupling to 0.20. Curvature tracking error was 0.00075 sd below 35 mph against
+      # 0.00014 above 50 - a 5x spread matching the 4.7x gain spread - while the controller never
+      # saturated and used only 241 of 1439 counts at its worst. The error is unbiased and its
+      # spectral character is identical at all speeds, so this is a gain deficit, not instability.
+      ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.12, 0.15, 0.20], [0.04, 0.035, 0.045]]
 
     elif candidate == CAR.SUBARU_CROSSTREK_HYBRID:
       ret.steerActuatorDelay = 0.1
@@ -87,9 +93,14 @@ class CarInterface(CarInterfaceBase):
     else:
       raise ValueError(f"unknown car: {candidate}")
 
-    # TODO: the longitudinal limits need to be speed-dependent, so alpha long is disabled for now
-    # revert this in the PR that re-enables Subaru longitudinal: https://github.com/commaai/opendbc/pull/3689
-    ret.alphaLongitudinalAvailable = False
+    ret.alphaLongitudinalAvailable = not (ret.flags & (SubaruFlags.GLOBAL_GEN2 | SubaruFlags.PREGLOBAL |
+                                                       SubaruFlags.LKAS_ANGLE | SubaruFlags.HYBRID))
+    # Per model, alongside the controller's own tables; see LONG_TUNE in values.py.
+    tune = long_tune(candidate)
+    ret.longitudinalActuatorDelay = tune["LONGITUDINAL_ACTUATOR_DELAY"]
+    ret.longitudinalTuning.kiBP = tune["KI_BP"]
+    ret.longitudinalTuning.kiV = tune["KI_V"]
+    ret.stopAccel = tune["STOP_ACCEL"]
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable
 
     if ret.flags & SubaruFlags.GLOBAL_GEN2 and ret.openpilotLongitudinalControl:
@@ -99,6 +110,13 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs[0].safetyParam |= SubaruSafetyFlags.LONG.value
 
     return ret
+
+  @staticmethod
+  def get_pid_accel_limits(CP, CP_SP, current_speed, cruise_speed):
+    # Flat per-car bounds, as gm and toyota do. Tapering toward the set speed is a ford-specific
+    # workaround for a PCM that refuses to accelerate there, and only clamps real acceleration
+    # here.
+    return CarControllerParams.ACCEL_MIN, long_tune(CP.carFingerprint)["ACCEL_MAX"]
 
   @staticmethod
   def _get_params_sp(stock_cp: structs.CarParams, ret: structs.CarParamsSP, candidate, fingerprint: dict[int, dict[int, int]],
