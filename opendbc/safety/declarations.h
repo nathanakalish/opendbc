@@ -248,6 +248,7 @@ bool steer_curvature_cmd_checks(int desired_curvature, int steer_power, bool ste
 bool longitudinal_accel_checks(int desired_accel, const LongitudinalLimits limits);
 bool longitudinal_speed_checks(int desired_speed, const LongitudinalLimits limits);
 bool longitudinal_gas_checks(int desired_gas, const LongitudinalLimits limits);
+bool longitudinal_transmission_rpm_checks(int desired_transmission_rpm, const LongitudinalLimits limits);
 bool longitudinal_brake_checks(int desired_brake, const LongitudinalLimits limits);
 bool longitudinal_interceptor_checks(const CANPacket_t *msg);  // gas interceptor
 void pcm_cruise_check(bool cruise_engaged);

@@ -28,10 +28,18 @@
 #define MSG_SUBARU_Brake_Pedal           0x139U
 
 #define MSG_SUBARU_ES_LKAS               0x122U
+#define MSG_SUBARU_ES_Brake              0x220U
 #define MSG_SUBARU_ES_Distance           0x221U
+#define MSG_SUBARU_ES_Status             0x222U
 #define MSG_SUBARU_ES_DashStatus         0x321U
 #define MSG_SUBARU_ES_LKAS_State         0x322U
 #define MSG_SUBARU_ES_Infotainment       0x323U
+
+#define MSG_SUBARU_ES_UDS_Request        0x787U
+
+#define MSG_SUBARU_ES_HighBeamAssist     0x22AU
+#define MSG_SUBARU_ES_STATIC_1           0x325U
+#define MSG_SUBARU_ES_STATIC_2           0x121U
 
 #define SUBARU_MAIN_BUS 0U
 #define SUBARU_ALT_BUS  1U
@@ -50,6 +58,17 @@
   {MSG_SUBARU_Throttle,          SUBARU_CAM_BUS,  8, .check_relay = true}, \
   {MSG_SUBARU_Brake_Pedal,       SUBARU_CAM_BUS,  8, .check_relay = true}, \
 
+#define SUBARU_COMMON_LONG_TX_MSGS(alt_bus) \
+  {MSG_SUBARU_ES_Distance,       alt_bus,         8, .check_relay = true}, \
+  {MSG_SUBARU_ES_Brake,          alt_bus,         8, .check_relay = true}, \
+  {MSG_SUBARU_ES_Status,         alt_bus,         8, .check_relay = true}, \
+
+#define SUBARU_GEN2_LONG_ADDITIONAL_TX_MSGS() \
+  {MSG_SUBARU_ES_UDS_Request,    SUBARU_CAM_BUS,  8, .check_relay = false}, \
+  {MSG_SUBARU_ES_HighBeamAssist, SUBARU_MAIN_BUS, 8, .check_relay = false}, \
+  {MSG_SUBARU_ES_STATIC_1,       SUBARU_MAIN_BUS, 8, .check_relay = false}, \
+  {MSG_SUBARU_ES_STATIC_2,       SUBARU_MAIN_BUS, 8, .check_relay = false}, \
+
 #define SUBARU_COMMON_RX_CHECKS(alt_bus)                                                                                                         \
   {.msg = {{MSG_SUBARU_Throttle,        SUBARU_MAIN_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, \
   {.msg = {{MSG_SUBARU_Steering_Torque, SUBARU_MAIN_BUS, 8, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
@@ -59,6 +78,7 @@
   {.msg = {{MSG_SUBARU_ES_LKAS_State,   SUBARU_CAM_BUS,  8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
 
 static bool subaru_gen2 = false;
+static bool subaru_longitudinal = false;
 
 static uint32_t subaru_get_checksum(const CANPacket_t *msg) {
   return (uint8_t)msg->data[0];
@@ -126,9 +146,39 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
   const TorqueSteeringLimits SUBARU_STEERING_LIMITS      = SUBARU_STEERING_LIMITS_GENERATOR(2047, 50, 70);
   const TorqueSteeringLimits SUBARU_GEN2_STEERING_LIMITS = SUBARU_STEERING_LIMITS_GENERATOR(1500, 35, 50);
 
+  // Speed-dependent gas ceiling, which is the limit #3689 asks for before Subaru longitudinal can
+  // be enabled: "the longitudinal limits need to be speed-dependent".
+  //
+  // A flat limit cannot bound acceleration, because the throttle needed merely to HOLD a speed
+  // rises with it - 1818 counts at rest against ~2870 at 65 mph - so the headroom above hold, which
+  // is the part that accelerates, shrinks as speed rises. The old flat 3400 therefore permitted
+  // +3.96 m/s^2 from a standstill while allowing only +0.77 at 65 mph: far too loose where the car
+  // is most able to lunge, and too tight where it needs authority on a grade.
+  //
+  // Each point is the count that yields 2.0 m/s^2 at that speed, from throttle-above-hold regressed
+  // on achieved acceleration on a 2021 Crosstrek. The curve is piecewise-linear and every segment
+  // sits at or below the measured envelope, so no speed in between exceeds 2.0 either.
+  const struct lookup_t SUBARU_MAX_GAS_LOOKUP = {
+    {0., 15., 29.},          // m/s
+    {2618., 3514., 4250.},   // counts yielding +2.0 m/s^2
+  };
+
+  // Fudged upward by 1 m/s, and taken from the highest recent sample rather than the lowest, for
+  // the same reason lateral.h fudges the other way: the limit must sit slightly LOOSER than the one
+  // openpilot applied, or a legitimate command is rejected simply because the panda read a stale
+  // speed between frames. A rejected throttle frame is itself a hazard - the panda drops it rather
+  // than clipping it, so the car loses longitudinal for that cycle.
+  const float fudged_speed = (vehicle_speed.max / VEHICLE_SPEED_FACTOR) + 1.;
+
+  // 4100 is the absolute ceiling, and above roughly 26 m/s it is what binds rather than the curve.
+  // Stock EyeSight commands up to 4100 on this car and has been logged slightly above it, so this
+  // is not openpilot asking for more authority than the OEM system uses; it is the point past
+  // which we decline to follow it.
+  const int SUBARU_MAX_GAS = SAFETY_MIN((int)safety_interpolate(SUBARU_MAX_GAS_LOOKUP, fudged_speed), 4100);
+
   const LongitudinalLimits SUBARU_LONG_LIMITS = {
     .min_gas = 808,       // appears to be engine braking
-    .max_gas = 3400,      // approx  2 m/s^2 when maxing cruise_rpm and cruise_throttle
+    .max_gas = SUBARU_MAX_GAS,
     .inactive_gas = 1818, // this is zero acceleration
     .max_brake = 600,     // approx -3.5 m/s^2
 
@@ -150,15 +200,41 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
     violation |= steer_torque_cmd_checks(desired_torque, steer_req, limits);
   }
 
+  // check es_brake brake_pressure limits
+  if (msg->addr == MSG_SUBARU_ES_Brake) {
+    int es_brake_pressure = GET_BYTES(msg, 2, 2);
+    violation |= longitudinal_brake_checks(es_brake_pressure, SUBARU_LONG_LIMITS);
+  }
+
   // check es_distance cruise_throttle limits
   if (msg->addr == MSG_SUBARU_ES_Distance) {
     int cruise_throttle = (GET_BYTES(msg, 2, 2) & 0x1FFFU);
     bool cruise_cancel = (msg->data[7] >> 0) & 1U;
 
-    // If openpilot is not controlling long, only allow ES_Distance for cruise cancel requests,
-    // (when Cruise_Cancel is true, and Cruise_Throttle is inactive)
-    violation |= (cruise_throttle != SUBARU_LONG_LIMITS.inactive_gas);
-    violation |= (!cruise_cancel);
+    if (subaru_longitudinal) {
+      violation |= longitudinal_gas_checks(cruise_throttle, SUBARU_LONG_LIMITS);
+    } else {
+      // If openpilot is not controlling long, only allow ES_Distance for cruise cancel requests,
+      // (when Cruise_Cancel is true, and Cruise_Throttle is inactive)
+      violation |= (cruise_throttle != SUBARU_LONG_LIMITS.inactive_gas);
+      violation |= (!cruise_cancel);
+    }
+  }
+
+  // check es_status transmission_rpm limits
+  if (msg->addr == MSG_SUBARU_ES_Status) {
+    int transmission_rpm = (GET_BYTES(msg, 2, 2) & 0x1FFFU);
+    violation |= longitudinal_transmission_rpm_checks(transmission_rpm, SUBARU_LONG_LIMITS);
+  }
+
+  if (msg->addr == MSG_SUBARU_ES_UDS_Request) {
+    // tester present ('\x02\x3E\x80\x00\x00\x00\x00\x00') is allowed for gen2 longitudinal to keep eyesight disabled
+    bool is_tester_present = (GET_BYTES(msg, 0, 4) == 0x00803E02U) && (GET_BYTES(msg, 4, 4) == 0x0U);
+
+    // reading ES button data by identifier (b'\x03\x22\x11\x30\x00\x00\x00\x00') is also allowed (DID 0x1130)
+    bool is_button_rdbi = (GET_BYTES(msg, 0, 4) == 0x30112203U) && (GET_BYTES(msg, 4, 4) == 0x0U);
+
+    violation |= !(is_tester_present || is_button_rdbi);
   }
 
   if (violation){
@@ -173,15 +249,40 @@ static safety_config subaru_init(uint16_t param) {
     SUBARU_COMMON_TX_MSGS(SUBARU_MAIN_BUS)
   };
 
+  static const CanMsg SUBARU_LONG_TX_MSGS[] = {
+    SUBARU_BASE_TX_MSGS(SUBARU_MAIN_BUS, MSG_SUBARU_ES_LKAS)
+    SUBARU_COMMON_LONG_TX_MSGS(SUBARU_MAIN_BUS)
+  };
+
   static const CanMsg SUBARU_GEN2_TX_MSGS[] = {
     SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS)
     SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
   };
 
-  static const CanMsg subaru_stop_and_go_tx_msgs[] = {
+  static const CanMsg SUBARU_SNG_TX_MSGS[] = {
     SUBARU_BASE_TX_MSGS(SUBARU_MAIN_BUS, MSG_SUBARU_ES_LKAS)
     SUBARU_COMMON_TX_MSGS(SUBARU_MAIN_BUS)
     SUBARU_STOP_AND_GO_TX_MSGS
+  };
+
+  static const CanMsg SUBARU_LONG_SNG_TX_MSGS[] = {
+    SUBARU_BASE_TX_MSGS(SUBARU_MAIN_BUS, MSG_SUBARU_ES_LKAS)
+    SUBARU_COMMON_LONG_TX_MSGS(SUBARU_MAIN_BUS)
+    SUBARU_STOP_AND_GO_TX_MSGS
+  };
+
+  static const CanMsg SUBARU_GEN2_LONG_TX_MSGS[] = {
+    SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS)
+    SUBARU_COMMON_LONG_TX_MSGS(SUBARU_ALT_BUS)
+    SUBARU_GEN2_LONG_ADDITIONAL_TX_MSGS()
+  };
+
+  static RxCheck subaru_rx_checks[] = {
+    SUBARU_COMMON_RX_CHECKS(SUBARU_MAIN_BUS)
+  };
+
+  static RxCheck subaru_gen2_rx_checks[] = {
+    SUBARU_COMMON_RX_CHECKS(SUBARU_ALT_BUS)
   };
 
   const uint16_t SUBARU_PARAM_GEN2 = 1;
@@ -190,21 +291,23 @@ static safety_config subaru_init(uint16_t param) {
 
   subaru_common_init();
 
-  // TODO: re-enable once more work is done on the limits
-  // revert this in the PR that re-enables Subaru longitudinal: https://github.com/commaai/opendbc/pull/3689
+#ifdef ALLOW_DEBUG
+  const uint16_t SUBARU_PARAM_LONGITUDINAL = 2;
+  subaru_longitudinal = GET_FLAG(param, SUBARU_PARAM_LONGITUDINAL);
+#endif
 
   safety_config ret;
   if (subaru_gen2) {
-    static RxCheck subaru_gen2_rx_checks[] = {
-      SUBARU_COMMON_RX_CHECKS(SUBARU_ALT_BUS)
-    };
-    ret = BUILD_SAFETY_CFG(subaru_gen2_rx_checks, SUBARU_GEN2_TX_MSGS);
+    ret = subaru_longitudinal ? BUILD_SAFETY_CFG(subaru_gen2_rx_checks, SUBARU_GEN2_LONG_TX_MSGS) : \
+                                BUILD_SAFETY_CFG(subaru_gen2_rx_checks, SUBARU_GEN2_TX_MSGS);
   } else {
-    static RxCheck subaru_rx_checks[] = {
-      SUBARU_COMMON_RX_CHECKS(SUBARU_MAIN_BUS)
-    };
-    ret = subaru_stop_and_go ? BUILD_SAFETY_CFG(subaru_rx_checks, subaru_stop_and_go_tx_msgs) : \
-                               BUILD_SAFETY_CFG(subaru_rx_checks, SUBARU_TX_MSGS);
+    if (subaru_longitudinal) {
+      ret = subaru_stop_and_go ? BUILD_SAFETY_CFG(subaru_rx_checks, SUBARU_LONG_SNG_TX_MSGS) : \
+                                 BUILD_SAFETY_CFG(subaru_rx_checks, SUBARU_LONG_TX_MSGS);
+    } else {
+      ret = subaru_stop_and_go ? BUILD_SAFETY_CFG(subaru_rx_checks, SUBARU_SNG_TX_MSGS) : \
+                                 BUILD_SAFETY_CFG(subaru_rx_checks, SUBARU_TX_MSGS);
+    }
   }
   return ret;
 }
