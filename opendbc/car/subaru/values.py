@@ -85,8 +85,20 @@ _CROSSTREK_LONG: dict = {
   # 5.86 m/s in 438 segments, so there is no stock support down there, and the proposed low-speed
   # raise would have pushed +0.29 to +0.40 m/s^2 of extra forward authority into exactly the
   # stop-and-go regime where the car already creeps into leads.
-  # Cruise_RPM and Cruise_Throttle are a coupled pair: only their JOINT delivery is identified, so
-  # neither table can be refitted alone. Retune both together or neither.
+  # NOT stock-derived, deliberately. Stock EyeSight holds this speed at roughly 1350-1710 rpm over
+  # 20-28 m/s and these values sit 350-700 above that. The stock figures were measured and tried,
+  # and acceleration delivery collapsed from 0.85x to 0.23x at 45-70 mph.
+  #
+  # The reason is that a hold table and its gain table are identified only as a PAIR: the hold sets
+  # the equilibrium, the gain sets the counts per m/s^2 above it, and the car's response depends on
+  # both. These values are the ones the measured THROTTLE_GAIN_V and RPM_GAIN_UP were fitted
+  # against. Moving a hold table toward stock while leaving the gains alone takes authority out of
+  # both channels at once.
+  #
+  # So when retuning a model: refit hold AND gain together, from the same frames, and check
+  # delivered acceleration by speed band afterwards - holding speed correctly is necessary but not
+  # sufficient. Score delivery against longitudinalPlan.aTarget, never against actuators.accel,
+  # which carries the integrator's standing offset and will read as a collapse that is not there.
   "RPM_HOLD_BP": [0.0, 8.0, 10.0, 16.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.5],
   "RPM_HOLD_V": [600,  600,  901, 1486, 2020, 2034, 2034, 2034, 2034, 2198, 2198],
   # Asymmetric: the car needs more ratio to accelerate than to give back. Scored sample by sample
