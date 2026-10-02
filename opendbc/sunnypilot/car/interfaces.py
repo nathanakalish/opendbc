@@ -141,7 +141,8 @@ def _initialize_radar_tracks(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
 
 
 def _initialize_stop_and_go(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_dict: dict[str, str]) -> None:
-  if CP.brand == 'subaru' and not CP.flags & (SubaruFlags.GLOBAL_GEN2 | SubaruFlags.HYBRID):
+  # Keeps stock EyeSight from releasing its standstill hold; openpilot longitudinal holds the stop itself.
+  if CP.brand == 'subaru' and not CP.flags & (SubaruFlags.GLOBAL_GEN2 | SubaruFlags.HYBRID) and not CP.openpilotLongitudinalControl:
     stop_and_go = int(params_dict.get("SubaruStopAndGo", 0)) == 1
     stop_and_go_manual_parking_brake = int(params_dict.get("SubaruStopAndGoManualParkingBrake", 0)) == 1
 
