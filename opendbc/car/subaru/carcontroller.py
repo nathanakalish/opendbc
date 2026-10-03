@@ -1,12 +1,14 @@
 import math
 import numpy as np
 from opendbc.can import CANPacker
-from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, DT_CTRL, make_tester_present_msg, rate_limit
+from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, DT_CTRL, make_tester_present_msg, rate_limit, structs
 from opendbc.car.common.filter_simple import FirstOrderFilter
 from opendbc.car.lateral import apply_driver_steer_torque_limits, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
+
+LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 # FIXME: These limits aren't exact. The real limit is more than likely over a larger time period and
 # involves the total steering angle change rather than rate, but these limits work well for now
@@ -22,6 +24,18 @@ GRADE_FF_MAX = 1.5  # m/s^2
 # planner's own jerk budget, so it shapes nothing in normal driving and only catches
 # discontinuities such as the longActive rising edge.
 ACCEL_RATE_LIMIT = 4.0 * DT_CTRL  # m/s^2 per frame
+
+# drive_helpers.should_stop's thresholds: a stopping state above the speed is not a standstill to
+# hold, and a request below the acceleration is not a request to move off.
+VEGO_STOPPING = 0.3  # m/s
+ACCEL_GO = 0.1  # m/s^2
+# Resuming this slowly after an override, a car that has stood still since it moved off may be
+# rolling back. That standstill can come just before the override, so it is tracked in both states.
+VEGO_RESUME_HOLD = 2.0  # m/s
+RESUME_HOLD_FRAMES = int(1.0 / DT_CTRL)
+# Where gravity beats creep, the throttle takes over under the hold as it lets go. Released first, the car rolls back
+# past VEGO_STOPPING, which reads as moving off and ends the stopping state for good.
+HILL_START_MARGIN = 0.3  # m/s^2 of grade term beyond A_COAST at rest
 
 # The model drops a distant lead for a few tenths of a second at a time, which flickers the
 # cluster's lead icon. Dash only - the control path still sees the raw signal.
@@ -41,13 +55,19 @@ class CarController(CarControllerBase):
 
     self.accel_last = 0.0
     self.rpm_last = None
+    self.hold_latched = False
+    self.resume_frames = 0
+    self.stood_still = False
     self.lead_hold = 0
     self.braking = False
-    self.decel_req = False
-    self.crawl_floor = 0.0
+    self.coasting = False
+    self.shut_frac = 0.0
+    self.stop_hold = 0.0
 
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
+
+    self.brake_tier2 = False
 
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
@@ -99,77 +119,107 @@ class CarController(CarControllerBase):
 
     # *** longitudinal ***
 
+    if CS.out.standstill:
+      self.stood_still = True
+    elif CS.out.vEgo >= VEGO_RESUME_HOLD or (CC.longActive and actuators.accel >= ACCEL_GO):
+      self.stood_still = False
+
     if CC.longActive:
-      # The stock lookup has no speed term, so zero requested accel always commands
-      # THROTTLE_INACTIVE, which only holds speed near 36-43 mph.
       v_ego_ff = CS.out.vEgo
-      thr_hold = float(np.interp(v_ego_ff, self.p.THROTTLE_HOLD_BP, self.p.THROTTLE_HOLD_V))
-      rpm_hold = float(np.interp(v_ego_ff, self.p.RPM_HOLD_BP, self.p.RPM_HOLD_V))
-      thr_gain = float(np.interp(v_ego_ff, self.p.THROTTLE_GAIN_BP,
-                                 self.p.THROTTLE_GAIN_V))
+      hill_start = (self.stop_hold > 0.0 and not self.hold_latched and actuators.accel >= 0.0 and
+                    accel_grade > float(np.interp(0.0, self.p.A_COAST_BP, self.p.A_COAST_V)) + HILL_START_MARGIN)
+      if hill_start:
+        self.accel_last = actuators.accel
       accel = rate_limit(actuators.accel, self.accel_last, -ACCEL_RATE_LIMIT, ACCEL_RATE_LIMIT)
       self.accel_last = accel
-
-      # One latched answer to "is a deceleration being requested", used by both protections below.
-      # Keyed on the planner's request rather than accel_ff: uphill the grade term is positive and
-      # would push accel_ff above the threshold, disabling both exactly where they are needed.
-      if self.decel_req:
-        self.decel_req = accel < self.p.DECEL_REQ_OFF
-      else:
-        self.decel_req = accel < self.p.DECEL_REQ_ON
-
       accel_ff = accel + accel_grade
-      # Deceleration needs more counts per m/s^2 than acceleration, and unlike the up side it is
-      # not speed dependent.
-      thr_slope = thr_gain if accel_ff >= 0.0 else self.p.THROTTLE_DECEL_GAIN
-      thr_raw = thr_hold + accel_ff * thr_slope
-      # Near a stop the hold table holds the car against its own brake, so close the throttle
-      # rather than part-closing it. Ramped out by 3 m/s, where delivery is already correct.
-      if self.decel_req:
-        keep = float(np.interp(v_ego_ff, self.p.THR_DECEL_CUT_BP,
-                               self.p.THR_DECEL_CUT_V))
-        thr_raw = CarControllerParams.THROTTLE_MIN + (thr_raw - CarControllerParams.THROTTLE_MIN) * keep
-      apply_throttle = int(round(thr_raw))
-      # The CVT ratio request carries real torque authority, so it gets the same treatment as the
-      # throttle: an asymmetric gain and a slew limit, both bounded by what stock respects.
-      rpm_gain = self.p.RPM_GAIN_UP if accel_ff >= 0.0 else self.p.RPM_GAIN_DOWN
-      rpm_raw = rpm_hold + accel_ff * rpm_gain
-      if self.rpm_last is None:
-        self.rpm_last = rpm_hold
-      apply_rpm = int(round(rate_limit(rpm_raw, self.rpm_last,
-                                       -self.p.RPM_RATE_DOWN * DT_CTRL,
-                                       self.p.RPM_RATE_UP * DT_CTRL)))
-      self.rpm_last = apply_rpm
 
-      # The brake supplies only what the throttle cannot. THR_DECEL is what a FULLY closed
-      # throttle delivers, so the credit is scaled by how far the throttle is actually closed - a
-      # throttle near its hold value is not slowing the car and must not be credited as if it
-      # were. accel_ff carries the grade term, so a descent spills more to the brake, as
-      # ford/carcontroller.py also does.
-      thr_span = max(thr_hold - CarControllerParams.THROTTLE_ENGINE_BRAKE, 1.0)
-      thr_closed = float(np.clip((thr_hold - apply_throttle) / thr_span, 0.0, 1.0))
-      accel_thr_min = float(np.interp(v_ego_ff, self.p.THR_DECEL_BP,
-                                      self.p.THR_DECEL_V)) * thr_closed
-      brake_accel = min(0.0, accel_ff - accel_thr_min)
-      apply_brake = int(round(np.interp(brake_accel,
-                                        CarControllerParams.BRAKE_LOOKUP_BP, CarControllerParams.BRAKE_LOOKUP_V)))
+      # The camera sends THROTTLE_MIN or at least THROTTLE_INACTIVE, never anything between, and the
+      # open branch's floor decelerates HANDOFF_BIAS less than a shut throttle. So the brake starts at
+      # that floor and the throttle shuts only once the brake carries the difference.
+      a_coast = float(np.interp(v_ego_ff, self.p.A_COAST_BP, self.p.A_COAST_V))
+      a_open_min = a_coast + self.p.HANDOFF_BIAS * float(np.interp(v_ego_ff, self.p.HANDOFF_TAPER_BP,
+                                                                    self.p.HANDOFF_TAPER_V))
+      if self.coasting:
+        self.coasting = accel_ff < a_coast
+      else:
+        # With no bias to bridge, the camera brakes under a shut throttle.
+        self.coasting = accel_ff < a_coast - (self.p.HANDOFF_HYST if a_open_min > a_coast else self.p.CRAWL_HYST)
 
-      # Do not dribble the brake: anything under the deadband is drag, not deceleration. The
-      # threshold is hysteretic because a demand parked on a single one toggles the brake, and
-      # with it the brake lights, every few frames.
+      thr_hold = float(np.interp(v_ego_ff, self.p.THROTTLE_HOLD_BP, self.p.THROTTLE_HOLD_V))
+      rpm_coast = float(np.interp(v_ego_ff, self.p.RPM_COAST_BP, self.p.RPM_COAST_V))
+      if self.coasting:
+        apply_throttle = float(CarControllerParams.THROTTLE_MIN)
+        apply_rpm = rpm_coast
+      elif accel_ff < a_open_min:
+        # EyeSight reaches most of this band with the throttle still open and no brake, which this
+        # map cannot, so it brakes lightly here and raises the brake annunciation where EyeSight
+        # would not. At a crawl the floor is positive, converter creep, so a crawl is held on brake.
+        apply_throttle = float(CarControllerParams.THROTTLE_INACTIVE)
+      else:
+        # A chord to the floor: the bottom few hundred counts are nearly flat, so a slope misses both ends.
+        thr_gain = float(np.interp(v_ego_ff, self.p.THROTTLE_GAIN_BP, self.p.THROTTLE_GAIN_V))
+        a_join = max(0.0, a_open_min + self.p.THROTTLE_CHORD_MIN)
+        if accel_ff >= a_join:
+          apply_throttle = thr_hold + accel_ff * thr_gain
+        else:
+          apply_throttle = float(np.interp(accel_ff, [a_open_min, a_join],
+                                           [CarControllerParams.THROTTLE_INACTIVE, thr_hold + a_join * thr_gain]))
+
+      if not self.coasting:
+        # Below about 2200 counts the camera holds the ratio near RPM_COAST instead of tracking.
+        rpm_hold = float(np.interp(v_ego_ff, self.p.RPM_HOLD_BP, self.p.RPM_HOLD_V))
+        apply_rpm = max(rpm_hold + (apply_throttle - thr_hold) * self.p.RPM_PER_THROTTLE, rpm_coast)
+
+      # The brake's zero follows the throttle's deceleration as it arrives, not as it is commanded,
+      # so neither a shut nor a re-open steps the brake ahead of the car.
+      self.shut_frac = rate_limit(float(self.coasting), self.shut_frac, -DT_CTRL / self.p.HANDOFF_OPEN_TIME,
+                                  DT_CTRL / self.p.HANDOFF_SHUT_TIME)
+      brake_zero = a_open_min + (a_coast - a_open_min) * self.shut_frac
+      apply_brake = max(0.0, (brake_zero - accel_ff) * self.p.BRAKE_GAIN)
+
+      # shouldStop never reaches CarControl, so the stopping state is the signal, as in gm, honda and
+      # toyota. A floor, not a replacement, which would drop the brake while the hold ramps in.
+      stopping = actuators.longControlState == LongCtrlState.stopping and v_ego_ff < VEGO_STOPPING
+      if stopping and CS.out.standstill:
+        self.hold_latched = True
+      elif actuators.accel >= ACCEL_GO:
+        # Once stopped, only a request to go ends it: wheel speed is unsigned, so a rollback reads as
+        # moving off and would end the stopping state just when the car needs holding.
+        self.hold_latched = False
+      # After an override the planner restarts from aEgo, which reads a rollback as speeding up.
+      if v_ego_ff >= VEGO_RESUME_HOLD:
+        self.resume_frames = 0
+      elif self.resume_frames > 0:
+        self.resume_frames -= 1
+        self.hold_latched = self.hold_latched or actuators.accel < 0.0
+      hold = self.p.HOLD_BRAKE if stopping or self.hold_latched else 0.0
+      hold_rate = float(np.interp(accel_grade, self.p.HOLD_BRAKE_RATE_BP, self.p.HOLD_BRAKE_RATE_V))
+      self.stop_hold = rate_limit(hold, self.stop_hold, -self.p.HOLD_BRAKE_RELEASE * DT_CTRL, hold_rate * DT_CTRL)
+      if hill_start and hold == 0.0:
+        apply_brake = max(apply_brake, self.stop_hold)
+      elif hold > 0.0 or self.stop_hold > 0.0:
+        apply_throttle = float(CarControllerParams.THROTTLE_MIN)
+        apply_rpm = float(self.p.RPM_STANDSTILL)
+        apply_brake = max(apply_brake, self.stop_hold)
+        self.coasting = True
+        # The request that reproduces the brake now on the car, so leaving the hold neither steps
+        # the throttle nor spends the launch unwinding the ramp to stopAccel as brake.
+        self.accel_last = brake_zero - apply_brake / self.p.BRAKE_GAIN - accel_grade
+
+      apply_brake = int(round(apply_brake))
       threshold = self.p.BRAKE_DEADBAND_RELEASE if self.braking else self.p.BRAKE_DEADBAND
       if apply_brake < threshold:
         apply_brake = 0
       self.braking = apply_brake > 0
-      # At a crawl the brake map, fitted at speed, under-asks badly against the torque converter.
-      # Floor it while a deceleration is requested so the car finishes the stop instead of
-      # creeping, ramped in by speed and by time so there is no step. Same gate as the throttle
-      # cut: converter creep does not care about the grade.
-      crawl_target = float(np.interp(v_ego_ff, self.p.CRAWL_BRAKE_BP,
-                                     self.p.CRAWL_BRAKE_V)) if self.decel_req else 0.0
-      step = self.p.CRAWL_BRAKE_RATE * DT_CTRL
-      self.crawl_floor = rate_limit(crawl_target, self.crawl_floor, -step, step)
-      apply_brake = max(apply_brake, int(round(self.crawl_floor)))
+
+      # The ratio request carries real torque authority, so it keeps a slew limit bounded by what
+      # stock respects. Seeded from the map, so the first engaged frame does not ramp.
+      if self.rpm_last is None:
+        self.rpm_last = apply_rpm
+      apply_rpm = rate_limit(apply_rpm, self.rpm_last, -self.p.RPM_RATE_DOWN * DT_CTRL,
+                             self.p.RPM_RATE_UP * DT_CTRL)
+      self.rpm_last = apply_rpm
 
       # The upper limit is speed dependent for the same reason the panda's is: a flat count is a
       # different acceleration at every speed. Clip here rather than let the panda refuse the
@@ -178,18 +228,26 @@ class CarController(CarControllerBase):
       thr_ceiling = min(float(np.interp(v_ego_ff, self.p.THROTTLE_MAX_BP,
                                         self.p.THROTTLE_MAX_V)),
                         CarControllerParams.THROTTLE_MAX)
-      cruise_throttle = np.clip(apply_throttle, CarControllerParams.THROTTLE_MIN, thr_ceiling)
-      cruise_rpm = np.clip(apply_rpm, CarControllerParams.RPM_MIN, CarControllerParams.RPM_MAX)
+      cruise_throttle = np.clip(round(apply_throttle), CarControllerParams.THROTTLE_MIN, thr_ceiling)
+      cruise_rpm = np.clip(round(apply_rpm), CarControllerParams.RPM_MIN, CarControllerParams.RPM_MAX)
       cruise_brake = np.clip(apply_brake, CarControllerParams.BRAKE_MIN, CarControllerParams.BRAKE_MAX)
     else:
+      self.hold_latched = False
+      self.resume_frames = RESUME_HOLD_FRAMES if self.stood_still else 0
       self.accel_last = 0.0
       self.braking = False
-      self.decel_req = False
-      self.crawl_floor = 0.0
-      self.rpm_last = None      # so the slew limit starts from the hold value, not a stale command
+      self.coasting = False
+      self.shut_frac = 0.0
+      self.stop_hold = 0.0
+      self.rpm_last = None      # so the slew limit starts from the map, not a stale command
       cruise_throttle = CarControllerParams.THROTTLE_INACTIVE
       cruise_rpm = CarControllerParams.RPM_MIN
       cruise_brake = CarControllerParams.BRAKE_MIN
+
+    if self.brake_tier2:
+      self.brake_tier2 = cruise_brake > CarControllerParams.BRAKE_TIER2_OFF
+    else:
+      self.brake_tier2 = cruise_brake > CarControllerParams.BRAKE_TIER2_ON
 
     # *** alerts and pcm cancel ***
     if self.CP.flags & SubaruFlags.PREGLOBAL:
@@ -235,13 +293,14 @@ class CarController(CarControllerBase):
       if self.CP.openpilotLongitudinalControl:
         if self.frame % 5 == 0:
           can_sends.append(subarucan.create_es_status(self.packer, self.frame // 5, CS.es_status_msg, bus,
-                                                      self.CP.openpilotLongitudinalControl, CC.longActive, cruise_rpm))
+                                                      self.CP.openpilotLongitudinalControl, CC.longActive, cruise_rpm,
+                                                      cruise_brake > 0))
 
           can_sends.append(subarucan.create_es_brake(self.packer, self.frame // 5, CS.es_brake_msg, bus,
                                                      self.CP.openpilotLongitudinalControl, CC.longActive, cruise_brake))
 
           can_sends.append(subarucan.create_es_distance(self.packer, self.frame // 5, CS.es_distance_msg, bus, pcm_cancel_cmd,
-                                                        self.CP.openpilotLongitudinalControl, cruise_brake > 0, cruise_throttle))
+                                                        self.CP.openpilotLongitudinalControl, self.brake_tier2, cruise_throttle))
       else:
         if pcm_cancel_cmd:
           if not (self.CP.flags & SubaruFlags.HYBRID):

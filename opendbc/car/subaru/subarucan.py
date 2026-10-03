@@ -261,7 +261,7 @@ def create_es_brake(packer, frame, es_brake_msg, bus, long_enabled, long_active,
   return packer.make_can_msg("ES_Brake", bus, values)
 
 
-def create_es_status(packer, frame, es_status_msg, bus, long_enabled, long_active, cruise_rpm):
+def create_es_status(packer, frame, es_status_msg, bus, long_enabled, long_active, cruise_rpm, brake_cmd=False):
   values = {s: es_status_msg[s] for s in [
     "CHECKSUM",
     "Signal1",
@@ -280,6 +280,10 @@ def create_es_status(packer, frame, es_status_msg, bus, long_enabled, long_activ
     values["Cruise_Fault"] = 0
 
     values["Cruise_Activated"] = long_active
+
+    # The camera's own frame is blocked in long mode, so without this the bit stays wherever the
+    # camera left it.
+    values["Brake_Lights"] = brake_cmd
 
   return packer.make_can_msg("ES_Status", bus, values)
 
