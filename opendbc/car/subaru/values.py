@@ -100,6 +100,10 @@ _CROSSTREK_LONG: dict = {
   # the request by more than a release band of a few counts, and each crossing would be a dab.
   "BRAKE_DEADBAND": 12,
   "BRAKE_DEADBAND_RELEASE": 1,
+  # Taken off the brake law at speed, faded out under firm braking. None below 8 m/s: stops and holds keep every count.
+  "BRAKE_OFFSET_BP": [8.0, 16.0],  # m/s
+  "BRAKE_OFFSET_V": [0.0, 25.0],  # counts
+  "BRAKE_OFFSET_FADE_BP": [150.0, 250.0],  # counts of brake demand
 
   # Set on CarParams in interface.py rather than read by the controller, but they are plant
   # properties like everything else here, so they belong with the model's tables.

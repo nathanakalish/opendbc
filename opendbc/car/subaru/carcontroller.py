@@ -143,11 +143,15 @@ class CarController(CarControllerBase):
       a_coast = float(np.interp(v_ego_ff, self.p.A_COAST_BP, self.p.A_COAST_V))
       a_open_min = a_coast + self.p.HANDOFF_BIAS * float(np.interp(v_ego_ff, self.p.HANDOFF_TAPER_BP,
                                                                     self.p.HANDOFF_TAPER_V))
+      # At speed the camera eases off for a gentle slowdown without braking, so there the brake gives up its first
+      # counts. The shut moves down by as much, so the brake under the open throttle still overlaps it.
+      brake_offset = float(np.interp(v_ego_ff, self.p.BRAKE_OFFSET_BP, self.p.BRAKE_OFFSET_V))
       if self.coasting:
         self.coasting = accel_ff < a_coast
       else:
         # With no bias to bridge, the camera brakes under a shut throttle.
-        self.coasting = accel_ff < a_coast - (self.p.HANDOFF_HYST if a_open_min > a_coast else self.p.CRAWL_HYST)
+        hyst = self.p.HANDOFF_HYST + brake_offset / self.p.BRAKE_GAIN
+        self.coasting = accel_ff < a_coast - (hyst if a_open_min > a_coast else self.p.CRAWL_HYST)
 
       thr_hold = float(np.interp(v_ego_ff, self.p.THROTTLE_HOLD_BP, self.p.THROTTLE_HOLD_V))
       rpm_coast = float(np.interp(v_ego_ff, self.p.RPM_COAST_BP, self.p.RPM_COAST_V))
@@ -180,6 +184,7 @@ class CarController(CarControllerBase):
                                   DT_CTRL / self.p.HANDOFF_SHUT_TIME)
       brake_zero = a_open_min + (a_coast - a_open_min) * self.shut_frac
       apply_brake = max(0.0, (brake_zero - accel_ff) * self.p.BRAKE_GAIN)
+      apply_brake = max(0.0, apply_brake - brake_offset * float(np.interp(apply_brake, self.p.BRAKE_OFFSET_FADE_BP, [1.0, 0.0])))
 
       # shouldStop never reaches CarControl, so the stopping state is the signal, as in gm, honda and
       # toyota. A floor, not a replacement, which would drop the brake while the hold ramps in.
