@@ -1,5 +1,5 @@
 from opendbc.car import structs
-from opendbc.car.subaru.values import CanBus, CarControllerParams
+from opendbc.car.subaru.values import CanBus
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 
@@ -68,8 +68,7 @@ def create_es_distance(packer, frame, es_distance_msg, bus, pcm_cancel_cmd, long
 
 
 def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, lat_active, cruise_available, dash_indicators,
-                         long_active, standstill, visual_alert, left_line, right_line,
-                         left_lane_depart, right_lane_depart):
+                         long_enabled, visual_alert, left_line, right_line, left_lane_depart, right_lane_depart):
   values = {s: es_lkas_state_msg[s] for s in [
     "CHECKSUM",
     "LKAS_Alert_Msg",
@@ -106,12 +105,9 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, lat_active, 
   if values["LKAS_Alert"] == 30:
     values["LKAS_Alert"] = 0
 
-  # The camera runs its own ACC state machine and will not hold at a standstill for more than a
-  # few seconds before beeping for the driver to take the brake. openpilot holds on brake pressure
-  # for as long as it needs to, so the demand is spurious: it fired 2 s after standstill and
-  # toggled three times in one second, which is what the driver heard. Gated on the hold, so an
-  # Audio_Beep raised for any other reason still reaches the driver.
-  if values["LKAS_Alert"] == 24 and long_active and standstill:
+  # While openpilot is engaged the camera still runs its own cruise, blind to ours: its brake beep and ACC disengaged chime
+  # come from timing out a standstill openpilot is holding, or from its own fault. Once openpilot disengages they are true.
+  if long_enabled and enabled and values["LKAS_Alert"] in (24, 26):
     values["LKAS_Alert"] = 0
 
   # Filter the stock LKAS sending "Keep hands on wheel OFF" alert (2020+ models)
@@ -159,7 +155,7 @@ def create_es_lkas_state(packer, frame, es_lkas_state_msg, enabled, lat_active, 
 
 
 def create_es_dashstatus(packer, frame, dashstatus_msg, enabled, long_enabled, long_active, dash_indicators,
-                         lead_visible, distance_bars, brake_value, brake_pressed, standstill):
+                         lead_visible, distance_bars, brake_lights, brake_pressed, standstill):
   values = {s: dashstatus_msg[s] for s in [
     "CHECKSUM",
     "PCB_Off",
@@ -197,6 +193,9 @@ def create_es_dashstatus(packer, frame, dashstatus_msg, enabled, long_enabled, l
     values["PCB_Off"] = 1 # AEB is not preserved, so show the PCB_Off on dash
     values["LDW_Off"] = 0
     values["Cruise_Fault"] = 0
+    # While openpilot is engaged, the camera's cruise off, unable to set and not ready messages describe its own cruise.
+    if enabled and values["Cruise_State_Msg"] in (1, 4, 5, 6, 7, 8, 11):
+      values["Cruise_State_Msg"] = 0
 
     if dash_indicators:
       # Bitfield: bit0 is HOLD. 3 would add READY, which the cluster renders as "Ready Hold".
@@ -211,8 +210,7 @@ def create_es_dashstatus(packer, frame, dashstatus_msg, enabled, long_enabled, l
 
       # Draws the brake lights on the car image, on both the cluster and the MFD. Stock only
       # reports the driver's own braking about two thirds of the time, so OR it in directly.
-      values["Brake_Lights"] = int(values["Brake_Lights"] or brake_pressed or
-                                   brake_value >= CarControllerParams.BRAKE_LIGHTS_THRESHOLD)
+      values["Brake_Lights"] = int(values["Brake_Lights"] or brake_pressed or brake_lights)
 
       # Both latch: after ~5s the crossed-out EyeSight mark replaces the lead car and the
       # distance bars, which openpilot now owns.
@@ -231,7 +229,7 @@ def create_es_dashstatus(packer, frame, dashstatus_msg, enabled, long_enabled, l
   return packer.make_can_msg("ES_DashStatus", CanBus.main, values)
 
 
-def create_es_brake(packer, frame, es_brake_msg, bus, long_enabled, long_active, brake_value):
+def create_es_brake(packer, frame, es_brake_msg, bus, long_enabled, long_active, brake_value, brake_lights):
   values = {s: es_brake_msg[s] for s in [
     "CHECKSUM",
     "Signal1",
@@ -256,7 +254,7 @@ def create_es_brake(packer, frame, es_brake_msg, bus, long_enabled, long_active,
     values["Brake_Pressure"] = brake_value
 
     values["Cruise_Brake_Active"] = brake_value > 0
-    values["Cruise_Brake_Lights"] = brake_value >= CarControllerParams.BRAKE_LIGHTS_THRESHOLD
+    values["Cruise_Brake_Lights"] = brake_lights
 
   return packer.make_can_msg("ES_Brake", bus, values)
 

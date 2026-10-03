@@ -68,6 +68,9 @@ class CarController(CarControllerBase):
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
 
     self.brake_tier2 = False
+    self.brake_lamp = False
+    self.lamp_frames = 0
+    self.lamp_accel = FirstOrderFilter(0.0, 0.15, DT_CTRL)
 
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
@@ -249,6 +252,16 @@ class CarController(CarControllerBase):
     else:
       self.brake_tier2 = cruise_brake > CarControllerParams.BRAKE_TIER2_ON
 
+    self.lamp_accel.update(CS.out.aEgo)
+    self.lamp_frames = self.lamp_frames + 1 if cruise_brake >= CarControllerParams.BRAKE_LAMP_ON else 0
+    crawl = CS.out.vEgo < CarControllerParams.BRAKE_LAMP_DECEL_V[int(self.brake_lamp)]
+    if self.brake_lamp:
+      self.brake_lamp = (cruise_brake > CarControllerParams.BRAKE_LAMP_OFF and
+                         (crawl or self.lamp_accel.x <= CarControllerParams.BRAKE_LAMP_DECEL_OFF))
+    else:
+      self.brake_lamp = (self.lamp_frames >= round(CarControllerParams.BRAKE_LAMP_DELAY / DT_CTRL) and
+                         (crawl or self.lamp_accel.x <= CarControllerParams.BRAKE_LAMP_DECEL_ON))
+
     # *** alerts and pcm cancel ***
     if self.CP.flags & SubaruFlags.PREGLOBAL:
       if self.frame % 5 == 0:
@@ -274,11 +287,11 @@ class CarController(CarControllerBase):
         can_sends.append(subarucan.create_es_dashstatus(self.packer, self.frame // 10, CS.es_dashstatus_msg,
                                                         CC.enabled, self.CP.openpilotLongitudinalControl, CC.longActive,
                                                         dash_indicators, lead_visible, hud_control.leadDistanceBars,
-                                                        cruise_brake, CS.out.brakePressed, CS.out.standstill))
+                                                        self.brake_lamp, CS.out.brakePressed, CS.out.standstill))
 
         can_sends.append(subarucan.create_es_lkas_state(self.packer, self.frame // 10, CS.es_lkas_state_msg, CC.enabled, CC.latActive,
                                                         CS.out.cruiseState.available, dash_indicators,
-                                                        CC.longActive, CS.out.standstill, hud_control.visualAlert,
+                                                        self.CP.openpilotLongitudinalControl, hud_control.visualAlert,
                                                         hud_control.leftLaneVisible, hud_control.rightLaneVisible,
                                                         hud_control.leftLaneDepart, hud_control.rightLaneDepart))
 
@@ -297,7 +310,8 @@ class CarController(CarControllerBase):
                                                       cruise_brake > 0))
 
           can_sends.append(subarucan.create_es_brake(self.packer, self.frame // 5, CS.es_brake_msg, bus,
-                                                     self.CP.openpilotLongitudinalControl, CC.longActive, cruise_brake))
+                                                     self.CP.openpilotLongitudinalControl, CC.longActive, cruise_brake,
+                                                     self.brake_lamp))
 
           can_sends.append(subarucan.create_es_distance(self.packer, self.frame // 5, CS.es_distance_msg, bus, pcm_cancel_cmd,
                                                         self.CP.openpilotLongitudinalControl, self.brake_tier2, cruise_throttle))
