@@ -46,98 +46,60 @@ _CROSSTREK_LONG: dict = {
   "THROTTLE_MAX_BP": [0.0,  15.0, 29.0],  # m/s
   "THROTTLE_MAX_V": [2618, 3514, 4250],  # counts
 
-  # Throttle and CVT RPM required to hold speed. Fitted from 29k engaged samples. kp is 0 on this
-  # plant, so the integrator is the whole feedback path and an error here does not show up as a
-  # tracking error - it becomes a permanent standing offset in the integrator.
-  "THROTTLE_HOLD_BP": [0.0, 3.0, 5.0, 9.0, 13.0, 15.0, 17.0, 19.0, 21.0, 25.0, 29.0, 32.5],
-  "THROTTLE_HOLD_V": [1818, 1870, 1920, 1950, 2030, 2110, 2350, 2380, 2520, 2660, 2870, 3020],
-  # Counts per m/s^2 for acceleration, speed indexed: CVT gearing makes the car far more
-  # responsive at low speed, by a factor of 1.75 across the range. Regressed from
-  # throttle-above-hold against achieved accel over 46k engaged samples at the measured 0.60 s lag.
-  "THROTTLE_GAIN_BP": [1.0, 3.0, 5.5,  8.0, 11.0, 15.5, 21.5],  # m/s
-  "THROTTLE_GAIN_V": [400, 510, 550,  610,  800,  690,  690],
-  # The fit above used acceleration samples only and says nothing about the way down, so the
-  # decel side is a separate constant rather than inheriting the speed curve.
-  "THROTTLE_DECEL_GAIN": 1005,
-  # Fraction of the throttle-above-idle kept while a deceleration is requested. Below about 1 m/s
-  # the hold table and the torque converter together drive the car forward against its own brake,
-  # delivering 17% of the request. Ramped out entirely by 3 m/s, where delivery is already 83-85%.
-  "THR_DECEL_CUT_BP": [1.0, 3.0],  # m/s
-  "THR_DECEL_CUT_V": [0.0, 1.0],
-  # Deceleration the closed throttle makes on its own, per speed. Measured from 3822 coastdown
-  # samples - driver off both pedals, cruise and openpilot long off - which is the only way to
-  # observe it: this controller never coasts, since the brake engages the moment the throttle
-  # floors, so no closed-throttle zero-brake sample exists in its own data. Gravity is removed by
-  # ADDING g*sin(pitch), because aEgo carries -g*sin (slope of aEgo on g*sin(pitch) = -1.04).
-  #   v m/s     1     3     5     7     9    12    16    20    24    28
-  #   a       +.21  -.24  -.28  -.33  -.40  -.44  -.44  -.52  -.55  -.62
-  # The old table asserted -0.65 from 5 m/s up. Engine braking does not reach that until ~27 m/s,
-  # so between 5 and 20 m/s the brake was being credited up to 0.37 m/s^2 the throttle never
-  # produced, and 171 counts per m/s^2 of brake was withheld - worst in the 11-25 mph band where a
-  # stop is approached. That is the same double-count defect as before, in the other direction.
-  "THR_DECEL_BP": [0.0,  1.0,  3.0,   5.0,   7.0,   9.0,   12.0,  16.0,  20.0,  24.0,  28.0],
-  "THR_DECEL_V": [0.25, 0.21, -0.24, -0.28, -0.33, -0.40, -0.44, -0.44, -0.52, -0.55, -0.62],
-  # Re-measured 2026-09-15 against what the stock camera commands at steady cruise. The five flat
-  # 2034 entries were 515-624 rpm HIGH at 18-26 m/s (n >= 112 stock frames at every point from
-  # 15 m/s up), which is plant gain the integrator then has to fight - the mid-speed abruptness.
-  # The dip at 20 relative to 16 is real CVT behaviour, not a typo: the ratio talls out as speed
-  # rises. Values BELOW 15 m/s are deliberately UNCHANGED - EyeSight's ACC was never active below
-  # 5.86 m/s in 438 segments, so there is no stock support down there, and the proposed low-speed
-  # raise would have pushed +0.29 to +0.40 m/s^2 of extra forward authority into exactly the
-  # stop-and-go regime where the car already creeps into leads.
-  # NOT stock-derived, deliberately. Stock EyeSight holds this speed at roughly 1350-1710 rpm over
-  # 20-28 m/s and these values sit 350-700 above that. The stock figures were measured and tried,
-  # and acceleration delivery collapsed from 0.85x to 0.23x at 45-70 mph.
-  #
-  # The reason is that a hold table and its gain table are identified only as a PAIR: the hold sets
-  # the equilibrium, the gain sets the counts per m/s^2 above it, and the car's response depends on
-  # both. These values are the ones the measured THROTTLE_GAIN_V and RPM_GAIN_UP were fitted
-  # against. Moving a hold table toward stock while leaving the gains alone takes authority out of
-  # both channels at once.
-  #
-  # So when retuning a model: refit hold AND gain together, from the same frames, and check
-  # delivered acceleration by speed band afterwards - holding speed correctly is necessary but not
-  # sufficient. Score delivery against longitudinalPlan.aTarget, never against actuators.accel,
-  # which carries the integrator's standing offset and will read as a collapse that is not there.
-  "RPM_HOLD_BP": [0.0, 8.0, 10.0, 16.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.5],
-  "RPM_HOLD_V": [600,  600,  901, 1486, 2020, 2034, 2034, 2034, 2034, 2198, 2198],
-  # Asymmetric: the car needs more ratio to accelerate than to give back. Scored sample by sample
-  # against stock's own command, and corroborated by stock's median margin over hold per accel bin.
-  "RPM_GAIN_UP": 1500,
-  "RPM_GAIN_DOWN": 700,
+  # Deceleration a shut throttle makes on its own, gravity-free; positive at a crawl, where converter
+  # creep pushes the car. From coastdowns, within 0.05 m/s^2 of the camera's own zero-brake frames.
+  "A_COAST_BP": [0.0,  1.0,  3.0,   5.0,   7.0,   9.0,   12.0,  16.0,  20.0,  24.0,  28.0],  # m/s
+  "A_COAST_V": [0.25, 0.21, -0.24, -0.28, -0.33, -0.40, -0.44, -0.44, -0.52, -0.55, -0.62],
+  # How much less the open branch's floor decelerates than a shut throttle, which is where the brake's
+  # zero sits while the throttle is open. 0.128 +/- 0.012 over 192 steady runs on four routes, flat
+  # over 14-35 m/s.
+  "HANDOFF_BIAS": 0.13,  # m/s^2
+  # Share of it applied, by speed. None below 2 m/s: the engine idles at either throttle position
+  # there, so there is no step to bridge and the bias would only put brake under a positive request.
+  "HANDOFF_TAPER_BP": [2.0, 3.0],  # m/s
+  "HANDOFF_TAPER_V": [0.0, 1.0],
+  # Delays the shut until the brake under the open throttle decelerates the car more than a shut
+  # throttle would, so the two positions overlap and leave no band the integral-only loop hunts
+  # across. Small brake commands do little, so that takes 68 counts, still under the lamp threshold.
+  # Never delays the re-open: above A_COAST a shut throttle cannot meet the request.
+  "HANDOFF_HYST": 0.24,  # m/s^2
+  # How long a shut throttle's extra engine braking takes to build (all of it by 1.8 s on the
+  # camera's own shuts), and an opened throttle's torque to come back (its 0.54 s lag).
+  "HANDOFF_SHUT_TIME": 1.8,  # s
+  "HANDOFF_OPEN_TIME": 0.5,  # s
+
+  # What the camera holds a speed with, and counts per m/s^2 above that, fitted to its own commands.
+  # Hold and gain are identified as a pair: retune them together, and score delivery against
+  # longitudinalPlan.aTarget rather than actuators.accel. Below 2 m/s even the floor holds a speed or
+  # more, so there the pair is the line through what the camera's commands deliver: a hold under 1818.
+  "THROTTLE_HOLD_BP": [0.3,   1.8,  3.4,  5.7,  8.3, 11.5, 14.5, 17.8, 20.5, 23.3, 26.4, 29.9, 33.2],
+  "THROTTLE_HOLD_V": [1792, 1840, 1959, 2141, 2141, 2242, 2309, 2369, 2468, 2642, 2769, 2797, 3025],
+  "THROTTLE_GAIN_BP": [0.3,  1.8,  3.4,  5.7,  8.3, 11.5, 14.5, 17.8, 20.5, 23.3, 26.4, 29.9, 33.2],
+  "THROTTLE_GAIN_V": [458,  502,  403,  426,  512,  667,  872, 1105, 1233, 1450, 1457, 1457, 1727],
+  "THROTTLE_CHORD_MIN": 0.15,  # m/s^2, the least request a chord up from the open floor spans
+  # The shut's band where there is no bias to bridge, below 2 m/s: under BRAKE_DEADBAND / BRAKE_GAIN, so the open throttle
+  # never brakes, and wide enough that a crawl's request, which rests on A_COAST, cannot flip the throttle every frame.
+  "CRAWL_HYST": 0.06,  # m/s^2
+  # The ratio request tracks the throttle, so it is fitted command on command.
+  "RPM_HOLD_BP": [0.0,  0.5,  1.1,  1.8,  2.6,  5.7,  8.3, 11.5, 14.5, 17.8, 20.5, 23.3, 26.4, 29.9, 33.2],
+  "RPM_HOLD_V": [100,  336,  578,  907, 1061, 1094, 1202, 1221, 1265, 1349, 1435, 1592, 1756, 2006, 2146],
+  "RPM_PER_THROTTLE": 0.64,
+  # What the camera requests with the throttle shut.
+  "RPM_COAST_BP": [0.0, 0.22, 0.52, 1.11, 1.84, 2.58, 5.09, 11.32, 19.54, 23.87, 28.9],
+  "RPM_COAST_V": [100,  207,  336,  578,  907, 1061, 1073,  1108,  1128,  1369,  1614],
+  "RPM_STANDSTILL": 100,  # at a standstill, as the camera does
   # The DOWN limit stops the ratio request collapsing in a step; stock respects it 99% of the time
   # and never exceeds it while decelerating hard, so it cannot blunt a real deceleration. The UP
   # limit is loose enough to catch only genuine discontinuities, well above the natural slew.
   "RPM_RATE_UP": 2000.0,  # counts per second
   "RPM_RATE_DOWN": 400.0,
-  # EyeSight commands 0 rather than a handful of counts, and the car's Brake_Status feedback
-  # confirms the hydraulics really do actuate on 1-10 count commands, so those are genuine drag.
-  # Zeroing below this takes engaged brake duty from 65.7% to 26.5% with no loss of authority
-  # anywhere it matters - the median brake at -2.0 m/s^2 is unchanged.
-  "BRAKE_DEADBAND": 30,
-  # Release lower than engage, so a steady small request stays on. With a single threshold the
-  # brake chatters whenever the demand sits on it - 16.6 applications a minute, median 0.25 s, many
-  # of them crossing the brake-light threshold - which is most of gentle downhill braking.
-  "BRAKE_DEADBAND_RELEASE": 12,
-  # Below walking pace the torque converter creeps the car forward and the brake map, fitted at
-  # speed, asks for far too little. Applied as a floor under a decel request, never an addition, so
-  # it cannot stack with the demand above it. Sized from what the stock long build sends while
-  # completing its own stops (85-136 counts); at 100 the car still rolled the last few feet,
-  # delivering 0.69x of the request below 3.4 mph against 1.07x above 6.7.
-  "CRAWL_BRAKE_BP": [0.8, 1.5],  # m/s, ramped out so there is no step at the threshold
-  "CRAWL_BRAKE_V": [130.0, 0.0],
-  # ...and ramped in over time as well as speed. Applying the floor as a step put the full value on
-  # the car in one frame, which is the "lurch" at the end of a stop. At this rate the floor above
-  # takes 0.39 s to reach, still quick enough to close the gap the brake map leaves at a crawl.
-  "CRAWL_BRAKE_RATE": 130.0 / 0.39,  # counts per second: the floor above, reached in 0.39 s
 
-  # Whether a deceleration was requested. Hysteretic for the same reason the brake deadband is: a
-  # single threshold chatters whenever the request hovers on it, and each toggle hands the throttle
-  # back and drops the crawl floor, so the car creeps forward mid-stop. The two thresholds are far
-  # apart because the signals they separate are: a request hovering around zero peaks near
-  # +0.1 m/s^2, while a genuine pull-away passes +0.40 within one frame of the car moving.
-  "DECEL_REQ_ON": -0.05,  # m/s^2, engage
-  "DECEL_REQ_OFF": 0.35,  # m/s^2, release
+  "BRAKE_GAIN": 185.0,  # counts per m/s^2 below the brake's zero, fitted to the camera's command
+  # Smaller commands are drag, not deceleration. Kept under HANDOFF_BIAS * BRAKE_GAIN, 24 counts, so
+  # the brake is on before the request reaches A_COAST, and released only at zero: aEgo noise moves
+  # the request by more than a release band of a few counts, and each crossing would be a dab.
+  "BRAKE_DEADBAND": 12,
+  "BRAKE_DEADBAND_RELEASE": 1,
 
   # Set on CarParams in interface.py rather than read by the controller, but they are plant
   # properties like everything else here, so they belong with the model's tables.
@@ -152,13 +114,18 @@ _CROSSTREK_LONG: dict = {
   # a large ki the fast route to a limit cycle. ford uses 0.5, honda nidec 1.2/0.8/0.5.
   "KI_BP": [0., 5., 35.],               # m/s
   "KI_V": [0.25, 0.25, 0.2],
-  # What the car is told to hold once LongCtrlState.stopping latches. This is the shared default
-  # from interfaces.py rather than an independently fitted number, set explicitly here so it is
-  # visible and tunable per model instead of silently inherited. Validated on the Crosstrek:
-  # -2.01 commanded at a standstill, 407 brake counts, and the car holds. It is a plant property
-  # in principle - mass and torque-converter creep decide how hard a car must be held against its
-  # own idle - so a heavier model may want more. Peers differ widely: vw -0.55, honda bosch -4.0.
-  "STOP_ACCEL": -2.0,                   # m/s^2
+  # The request ramps toward this once LongCtrlState.stopping latches. With the grade term that
+  # holds 314 - 185 * grade counts on a descent, against EyeSight's 324 - 174 * grade.
+  "STOP_ACCEL": -1.45,                  # m/s^2
+  # The floor under it: EyeSight settles at 304 on the flat and uphill alike, and the Crosstrek has a
+  # manual parking brake, so brake pressure is the only hold there is.
+  "HOLD_BRAKE": 304.0,  # counts
+  # Ramped rather than stepped, which is the lurch at the end of a stop: gently where the request
+  # already holds the car, quickly on a steep climb, where the grade term cancels it and only the
+  # floor holds. Indexed by accel_grade as computed, pitch calibration residual included.
+  "HOLD_BRAKE_RATE_BP": [0.7, 1.2],  # m/s^2 of grade
+  "HOLD_BRAKE_RATE_V": [150.0, 500.0],  # counts per second, applying
+  "HOLD_BRAKE_RELEASE": 1000.0,  # counts per second, releasing
 }
 
 
@@ -195,18 +162,20 @@ class CarControllerParams:
   # THROTTLE_MAX_BP / THROTTLE_MAX_V binds below it almost everywhere.
   THROTTLE_MAX = 4100
 
-  THROTTLE_INACTIVE = 1818  # corresponds to zero acceleration
-  THROTTLE_ENGINE_BRAKE = 808  # while braking, eyesight sets throttle to this, probably for engine braking
+  # The inactive command, and the bottom of the open branch: the camera sends either THROTTLE_MIN
+  # or at least this, never anything in between.
+  THROTTLE_INACTIVE = 1818
 
   BRAKE_MIN = 0
-  BRAKE_MAX = 600  # about -3.5m/s2 from testing
+  BRAKE_MAX = 600  # A_COAST - 3.24 m/s^2 at BRAKE_GAIN
   BRAKE_LIGHTS_THRESHOLD = 70  # brake command at which the lamps, and the cluster's drawing of them, light
+  # ES_Distance.Cruise_Brake_Active follows the brake past the camera's 20-count resting notch, split
+  # around it because this controller's request does not rest on a notch and would dither across it.
+  BRAKE_TIER2_ON = 24
+  BRAKE_TIER2_OFF = 12
 
   RPM_MIN = 0
   RPM_MAX = 3600
-
-  BRAKE_LOOKUP_BP = [-3.5, 0]
-  BRAKE_LOOKUP_V = [BRAKE_MAX, BRAKE_MIN]
 
 
 class SubaruSafetyFlags(IntFlag):
