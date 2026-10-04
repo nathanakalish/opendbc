@@ -90,7 +90,10 @@ class CarController(CarControllerBase):
     # pitch carries a calibration residual that varies by drive, +1.4 to +2.4 deg on a comma 4, a phantom
     # climb the integrator has to unwind after every engagement and stop.
     if CS.accel_long is not None:
-      self.grade.update(CS.accel_long - CS.out.aEgo)
+      accel_long = CS.accel_long
+      if accel_long != 0.0:
+        accel_long += math.copysign(self.p.G_SENSOR_DEADBAND, accel_long)
+      self.grade.update(accel_long - CS.out.aEgo)
     elif len(CC.orientationNED) == 3:
       self.grade.update(math.sin(CC.orientationNED[1]) * ACCELERATION_DUE_TO_GRAVITY)
     accel_grade = float(np.clip(GRADE_FF_GAIN * self.grade.x, -GRADE_FF_MAX, GRADE_FF_MAX))

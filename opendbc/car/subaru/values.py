@@ -105,6 +105,11 @@ _CROSSTREK_LONG: dict = {
   "BRAKE_OFFSET_V": [0.0, 25.0],  # counts
   "BRAKE_OFFSET_FADE_BP": [150.0, 250.0],  # counts of brake demand
 
+  # The G_Sensor reads zero inside about +/-0.15 m/s^2 and some 0.1 short beyond it, against GPS and
+  # the comma's own accelerometer, so a reading that moved gets that back. Left on its own it reads
+  # hills shallow and every slowdown as a slight climb, about 0.1 m/s^2 short of the request.
+  "G_SENSOR_DEADBAND": 0.10,  # m/s^2
+
   # Set on CarParams in interface.py rather than read by the controller, but they are plant
   # properties like everything else here, so they belong with the model's tables.
   #
@@ -359,11 +364,12 @@ class CAR(Platforms):
     flags=SubaruFlags.LKAS_ANGLE,
   )
 
+# The accelerometer's dead zone is measured on the Crosstrek alone, so the inherited tables leave it out.
 LONG_TUNE: dict = {
   CAR.SUBARU_IMPREZA_2020: dict(_CROSSTREK_LONG),   # measured, 2021 Crosstrek Sport
-  CAR.SUBARU_IMPREZA:      dict(_CROSSTREK_LONG),   # UNMEASURED - inherited
-  CAR.SUBARU_FORESTER:     dict(_CROSSTREK_LONG),   # UNMEASURED - inherited
-  CAR.SUBARU_ASCENT:       dict(_CROSSTREK_LONG),   # UNMEASURED - inherited
+  CAR.SUBARU_IMPREZA:      dict(_CROSSTREK_LONG, G_SENSOR_DEADBAND=0.0),   # UNMEASURED - inherited
+  CAR.SUBARU_FORESTER:     dict(_CROSSTREK_LONG, G_SENSOR_DEADBAND=0.0),   # UNMEASURED - inherited
+  CAR.SUBARU_ASCENT:       dict(_CROSSTREK_LONG, G_SENSOR_DEADBAND=0.0),   # UNMEASURED - inherited
 }
 
 
