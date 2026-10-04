@@ -126,8 +126,9 @@ _CROSSTREK_LONG: dict = {
   "HOLD_BRAKE": 304.0,  # counts
   # Ramped rather than stepped, which is the lurch at the end of a stop: gently where the request
   # already holds the car, quickly on a steep climb, where the grade term cancels it and only the
-  # floor holds. Indexed by accel_grade as computed, pitch calibration residual included.
-  "HOLD_BRAKE_RATE_BP": [0.7, 1.2],  # m/s^2 of grade
+  # floor holds. Set against the pose's pitch, then moved down by its median residual at a standstill,
+  # 0.15 over eight drives, when the grade term moved to the car's accelerometer.
+  "HOLD_BRAKE_RATE_BP": [0.55, 1.05],  # m/s^2 of grade
   "HOLD_BRAKE_RATE_V": [150.0, 500.0],  # counts per second, applying
   "HOLD_BRAKE_RELEASE": 1000.0,  # counts per second, releasing
 }
