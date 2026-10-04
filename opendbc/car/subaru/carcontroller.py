@@ -25,6 +25,10 @@ GRADE_FF_MAX = 1.5  # m/s^2
 # discontinuities such as the longActive rising edge.
 ACCEL_RATE_LIMIT = 4.0 * DT_CTRL  # m/s^2 per frame
 
+# How far above ACCEL_MIN the brake starts blending toward BRAKE_MAX. Narrow enough that the law
+# commands more until the last 0.1 m/s^2, so only a request at the floor changes.
+FULL_BRAKE_SPAN = 0.5  # m/s^2
+
 # drive_helpers.should_stop's thresholds: a stopping state above the speed is not a standstill to
 # hold, and a request below the acceleration is not a request to move off.
 VEGO_STOPPING = 0.3  # m/s
@@ -35,7 +39,8 @@ VEGO_RESUME_HOLD = 2.0  # m/s
 RESUME_HOLD_FRAMES = int(1.0 / DT_CTRL)
 # Where gravity beats creep, the throttle takes over under the hold as it lets go. Released first, the car rolls back
 # past VEGO_STOPPING, which reads as moving off and ends the stopping state for good.
-HILL_START_MARGIN = 0.3  # m/s^2 of grade term beyond A_COAST at rest
+# Moved down by the pose's 0.15 standstill residual with HOLD_BRAKE_RATE_BP.
+HILL_START_MARGIN = 0.15  # m/s^2 of grade term beyond A_COAST at rest
 
 # The model drops a distant lead for a few tenths of a second at a time, which flickers the
 # cluster's lead icon. Dash only - the control path still sees the raw signal.
@@ -50,8 +55,8 @@ class CarController(CarControllerBase):
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
 
-    # Raw pitch is noisy enough to chatter the throttle; grade changes slowly.
-    self.pitch = FirstOrderFilter(0.0, 0.5, DT_CTRL)
+    # Either source is noisy enough to chatter the throttle; grade changes slowly.
+    self.grade = FirstOrderFilter(0.0, 0.5, DT_CTRL)
 
     self.accel_last = 0.0
     self.rpm_last = None
@@ -79,12 +84,16 @@ class CarController(CarControllerBase):
 
     can_sends = []
 
-    # Track pitch every cycle, not just while engaged, so the filter is converged at engagement.
-    # Same as toyota/carcontroller.py.
-    if len(CC.orientationNED) == 3:
-      self.pitch.update(CC.orientationNED[1])
-    accel_grade = float(np.clip(GRADE_FF_GAIN * math.sin(self.pitch.x) * ACCELERATION_DUE_TO_GRAVITY,
-                                -GRADE_FF_MAX, GRADE_FF_MAX))
+    # Track grade every cycle, not just while engaged, so the filter is converged at engagement.
+    # Same as toyota/carcontroller.py. The car's accelerometer reads acceleration plus gravity, so less
+    # the wheels' acceleration it is the slope, and it reads level within 0.2 deg over a drive. The pose's
+    # pitch carries a calibration residual that varies by drive, +1.4 to +2.4 deg on a comma 4, a phantom
+    # climb the integrator has to unwind after every engagement and stop.
+    if CS.accel_long is not None:
+      self.grade.update(CS.accel_long - CS.out.aEgo)
+    elif len(CC.orientationNED) == 3:
+      self.grade.update(math.sin(CC.orientationNED[1]) * ACCELERATION_DUE_TO_GRAVITY)
+    accel_grade = float(np.clip(GRADE_FF_GAIN * self.grade.x, -GRADE_FF_MAX, GRADE_FF_MAX))
 
     dash_indicators = bool(self.CP.flags & SubaruFlags.DASH_INDICATORS)
     if hud_control.leadVisible:
@@ -185,6 +194,11 @@ class CarController(CarControllerBase):
       brake_zero = a_open_min + (a_coast - a_open_min) * self.shut_frac
       apply_brake = max(0.0, (brake_zero - accel_ff) * self.p.BRAKE_GAIN)
       apply_brake = max(0.0, apply_brake - brake_offset * float(np.interp(apply_brake, self.p.BRAKE_OFFSET_FADE_BP, [1.0, 0.0])))
+      # The planner's floor asks for all the brake there is, which the law leaves up to 70 counts short of
+      # BRAKE_MAX on the flat at speed, more uphill. EyeSight's hard stops peak at 578-611.
+      apply_brake = max(apply_brake, float(np.interp(accel, [CarControllerParams.ACCEL_MIN,
+                                                             CarControllerParams.ACCEL_MIN + FULL_BRAKE_SPAN],
+                                                     [CarControllerParams.BRAKE_MAX, 0.0])))
 
       # shouldStop never reaches CarControl, so the stopping state is the signal, as in gm, honda and
       # toyota. A floor, not a replacement, which would drop the brake while the hold ramps in.

@@ -6,6 +6,8 @@ from opendbc.car.interfaces import CarStateBase
 from opendbc.car.subaru.values import DBC, CanBus, SubaruFlags
 from opendbc.car import CanSignalRateCalculator
 
+G_SENSOR_TIMEOUT = 100_000_000  # ns, five of its 50 Hz frames
+
 
 class CarState(CarStateBase):
   def __init__(self, CP):
@@ -14,6 +16,7 @@ class CarState(CarStateBase):
     self.shifter_values = can_define.dv["Transmission"]["Gear"]
 
     self.angle_rate_calulator = CanSignalRateCalculator(50)
+    self.accel_long = None
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.pt]
@@ -47,6 +50,13 @@ class CarState(CarStateBase):
       cp_wheels.vl["Wheel_Speeds"]["RR"],
     )
     ret.standstill = ret.vEgoRaw == 0
+
+    # The car's own accelerometer, for the grade feedforward. Optional, so a car without it falls back to
+    # the pose: stale by more than a few of its frames, it reads as absent.
+    if self.CP.openpilotLongitudinalControl:
+      seen = cp.ts_nanos["G_Sensor"]["Longitudinal"]
+      fresh = seen > 0 and cp_wheels.ts_nanos["Wheel_Speeds"]["FL"] - seen < G_SENSOR_TIMEOUT
+      self.accel_long = cp.vl["G_Sensor"]["Longitudinal"] if fresh else None
 
     # continuous blinker signals for assisted lane change
     ret.leftBlinker, ret.rightBlinker = self.update_blinker_from_lamp(50, cp.vl["Dashlights"]["LEFT_BLINKER"],
@@ -145,8 +155,9 @@ class CarState(CarStateBase):
 
   @staticmethod
   def get_can_parsers(CP):
+    pt_messages = [("G_Sensor", float('nan'))] if CP.openpilotLongitudinalControl else []
     return {
-      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus.main),
+      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, CanBus.main),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus.camera),
       Bus.alt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus.alt)
     }
