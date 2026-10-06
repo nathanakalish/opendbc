@@ -222,12 +222,6 @@ class SubaruFlags(IntFlag):
   HYBRID = 32
   LKAS_ANGLE = 64
 
-  # Cluster and MFD indicators driven from openpilot's own state rather than passed through from
-  # the camera. Global gen1 shares the cluster vocabulary, so all four platforms set it. A
-  # per-platform flag rather than a gen1 test, so a car whose cluster renders a value differently
-  # can be dropped on its own.
-  DASH_INDICATORS = 128
-
 
 GLOBAL_ES_ADDR = 0x787
 GEN2_ES_BUTTONS_DID = b'\x11\x30'
@@ -282,7 +276,6 @@ class CAR(Platforms):
   SUBARU_ASCENT = SubaruPlatformConfig(
     [SubaruCarDocs("Subaru Ascent 2019-21", "All")],
     CarSpecs(mass=2031, wheelbase=2.89, steerRatio=13.5),
-    flags=SubaruFlags.DASH_INDICATORS,
   )
   SUBARU_OUTBACK = SubaruGen2PlatformConfig(
     [SubaruCarDocs("Subaru Outback 2020-22", "All", car_parts=CarParts.common([CarHarness.subaru_b]))],
@@ -299,7 +292,6 @@ class CAR(Platforms):
       SubaruCarDocs("Subaru XV 2018-19", video="https://youtu.be/Agww7oE1k-s?t=26"),
     ],
     CarSpecs(mass=1568, wheelbase=2.67, steerRatio=15),
-    flags=SubaruFlags.DASH_INDICATORS,
   )
   SUBARU_IMPREZA_2020 = SubaruPlatformConfig(
     [
@@ -308,7 +300,7 @@ class CAR(Platforms):
       SubaruCarDocs("Subaru XV 2020-21"),
     ],
     CarSpecs(mass=1480, wheelbase=2.67, steerRatio=17),
-    flags=SubaruFlags.STEER_RATE_LIMITED | SubaruFlags.DASH_INDICATORS,
+    flags=SubaruFlags.STEER_RATE_LIMITED,
   )
   # TODO: is there an XV and Impreza too?
   SUBARU_CROSSTREK_HYBRID = SubaruPlatformConfig(
@@ -319,7 +311,7 @@ class CAR(Platforms):
   SUBARU_FORESTER = SubaruPlatformConfig(
     [SubaruCarDocs("Subaru Forester 2019-21", "All")],
     CarSpecs(mass=1568, wheelbase=2.67, steerRatio=17),
-    flags=SubaruFlags.STEER_RATE_LIMITED | SubaruFlags.DASH_INDICATORS,
+    flags=SubaruFlags.STEER_RATE_LIMITED,
   )
   SUBARU_FORESTER_HYBRID = SubaruPlatformConfig(
     [SubaruCarDocs("Subaru Forester Hybrid 2020")],

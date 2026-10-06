@@ -293,7 +293,8 @@ static safety_config subaru_init(uint16_t param) {
 
 #ifdef ALLOW_DEBUG
   const uint16_t SUBARU_PARAM_LONGITUDINAL = 2;
-  subaru_longitudinal = GET_FLAG(param, SUBARU_PARAM_LONGITUDINAL);
+  // gen1 only: a gen2 car stays on stock longitudinal whatever it is asked for
+  subaru_longitudinal = GET_FLAG(param, SUBARU_PARAM_LONGITUDINAL) && !subaru_gen2;
 #endif
 
   safety_config ret;
