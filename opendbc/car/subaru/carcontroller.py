@@ -89,16 +89,19 @@ class CarController(CarControllerBase):
     # the wheels' acceleration it is the slope, and it reads level within 0.2 deg over a drive. The pose's
     # pitch carries a calibration residual that varies by drive, +1.4 to +2.4 deg on a comma 4, a phantom
     # climb the integrator has to unwind after every engagement and stop.
-    if CS.accel_long is not None:
-      accel_long = CS.accel_long
-      if accel_long != 0.0:
-        accel_long += math.copysign(self.p.G_SENSOR_DEADBAND, accel_long)
-      self.grade.update(accel_long - CS.out.aEgo)
-    elif len(CC.orientationNED) == 3:
-      self.grade.update(math.sin(CC.orientationNED[1]) * ACCELERATION_DUE_TO_GRAVITY)
-    accel_grade = float(np.clip(GRADE_FF_GAIN * self.grade.x, -GRADE_FF_MAX, GRADE_FF_MAX))
+    accel_grade = 0.0
+    if self.CP.openpilotLongitudinalControl:
+      if CS.accel_long is not None:
+        accel_long = CS.accel_long
+        if accel_long != 0.0:
+          accel_long += math.copysign(self.p.G_SENSOR_DEADBAND, accel_long)
+        self.grade.update(accel_long - CS.out.aEgo)
+      elif len(CC.orientationNED) == 3:
+        self.grade.update(math.sin(CC.orientationNED[1]) * ACCELERATION_DUE_TO_GRAVITY)
+      accel_grade = float(np.clip(GRADE_FF_GAIN * self.grade.x, -GRADE_FF_MAX, GRADE_FF_MAX))
 
-    dash_indicators = bool(self.CP.flags & SubaruFlags.DASH_INDICATORS)
+    # Under stock longitudinal the camera's own cruise is the one running, so the cluster stays on it.
+    dash_indicators = self.CP.openpilotLongitudinalControl
     if hud_control.leadVisible:
       self.lead_hold = LEAD_HOLD_FRAMES
     elif self.lead_hold > 0:

@@ -244,42 +244,9 @@ class TestSubaruGen1LongitudinalSafety(TestSubaruLongitudinalSafetyBase, TestSub
                                                SubaruMsg.ES_Distance)}
 
 
-class TestSubaruGen2LongitudinalSafety(TestSubaruLongitudinalSafetyBase, TestSubaruGen2TorqueSafetyBase):
+class TestSubaruGen2LongitudinalIgnoredSafety(TestSubaruGen2TorqueStockLongitudinalSafety):
+  # Longitudinal is gen1 only: the LONG flag on a gen2 car leaves it exactly on stock longitudinal.
   FLAGS = SubaruSafetyFlags.LONG | SubaruSafetyFlags.GEN2
-  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS) + long_tx_msgs(SUBARU_ALT_BUS) + gen2_long_additional_tx_msgs()
-  FWD_BLACKLISTED_ADDRS = {2: [SubaruMsg.ES_LKAS, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
-                               SubaruMsg.ES_Infotainment]}
-  RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
-                                               SubaruMsg.ES_Infotainment),
-                             SUBARU_ALT_BUS: (SubaruMsg.ES_Brake, SubaruMsg.ES_Status, SubaruMsg.ES_Distance)}
-
-  def _rdbi_msg(self, did: int):
-    return b'\x03\x22' + did.to_bytes(2) + b'\x00\x00\x00\x00'
-
-  def _es_uds_msg(self, msg: bytes):
-    return libsafety_py.make_CANPacket(SubaruMsg.ES_UDS_Request, 2, msg)
-
-  def test_es_uds_message(self):
-    tester_present = b'\x02\x3E\x80\x00\x00\x00\x00\x00'
-    not_tester_present = b"\x03\xAA\xAA\x00\x00\x00\x00\x00"
-
-    button_did = 0x1130
-
-    # Tester present is allowed for gen2 long to keep eyesight disabled
-    self.assertTrue(self._tx(self._es_uds_msg(tester_present)))
-
-    # Non-Tester present is not allowed
-    self.assertFalse(self._tx(self._es_uds_msg(not_tester_present)))
-
-    # Only button_did is allowed to be read via UDS
-    for did in range(0xFFFF):
-      should_tx = (did == button_did)
-      self.assertEqual(self._tx(self._es_uds_msg(self._rdbi_msg(did))), should_tx)
-
-    # any other msg is not allowed
-    for sid in range(0xFF):
-      msg = b'\x03' + sid.to_bytes(1) + b'\x00' * 6
-      self.assertFalse(self._tx(self._es_uds_msg(msg)))
 
 
 if __name__ == "__main__":
