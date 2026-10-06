@@ -50,6 +50,11 @@ _CROSSTREK_LONG: dict = {
   # creep pushes the car. From coastdowns, within 0.05 m/s^2 of the camera's own zero-brake frames.
   "A_COAST_BP": [0.0,  1.0,  3.0,   5.0,   7.0,   9.0,   12.0,  16.0,  20.0,  24.0,  28.0],  # m/s
   "A_COAST_V": [0.25, 0.21, -0.24, -0.28, -0.33, -0.40, -0.44, -0.44, -0.52, -0.55, -0.62],
+  # Creep beyond A_COAST at a walking pace: a shut throttle pushes +0.40 m/s^2 at 0.2-0.6 m/s and +0.28 at 1 m/s.
+  # Without it a gentle stop request only cancels creep and the car rolls on above should_stop's 0.3 m/s. Zero at
+  # a standstill, which the stop hold owns, and gone by 1.5 m/s.
+  "CREEP_BP": [0.0, 0.3, 0.5, 1.0, 1.5],  # m/s
+  "CREEP_V": [0.0, 0.17, 0.16, 0.07, 0.0],  # m/s^2
   # How much less the open branch's floor decelerates than a shut throttle, which is where the brake's
   # zero sits while the throttle is open. 0.128 +/- 0.012 over 192 steady runs on four routes, flat
   # over 14-35 m/s.

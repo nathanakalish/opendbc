@@ -195,6 +195,10 @@ class CarController(CarControllerBase):
       self.shut_frac = rate_limit(float(self.coasting), self.shut_frac, -DT_CTRL / self.p.HANDOFF_OPEN_TIME,
                                   DT_CTRL / self.p.HANDOFF_SHUT_TIME)
       brake_zero = a_open_min + (a_coast - a_open_min) * self.shut_frac
+      # At a walking pace the shut throttle creeps harder than A_COAST, so the brake takes the difference, as ford's
+      # creep compensation does. Brake side only, fading out as the request turns to go.
+      brake_zero += (float(np.interp(v_ego_ff, self.p.CREEP_BP, self.p.CREEP_V)) *
+                     float(np.interp(accel, [0.0, 0.2], [1.0, 0.0])) * self.shut_frac)
       apply_brake = max(0.0, (brake_zero - accel_ff) * self.p.BRAKE_GAIN)
       apply_brake = max(0.0, apply_brake - brake_offset * float(np.interp(apply_brake, self.p.BRAKE_OFFSET_FADE_BP, [1.0, 0.0])))
       # The planner's floor asks for all the brake there is, which the law leaves up to 70 counts short of
