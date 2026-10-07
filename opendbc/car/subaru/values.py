@@ -80,7 +80,9 @@ _CROSSTREK_LONG: dict = {
   "THROTTLE_HOLD_BP": [0.3,   1.8,  3.4,  5.7,  8.3, 11.5, 14.5, 17.8, 20.5, 23.3, 26.4, 29.9, 33.2],
   "THROTTLE_HOLD_V": [1792, 1840, 1959, 2141, 2141, 2242, 2309, 2369, 2468, 2642, 2769, 2797, 3025],
   "THROTTLE_GAIN_BP": [0.3,  1.8,  3.4,  5.7,  8.3, 11.5, 14.5, 17.8, 20.5, 23.3, 26.4, 29.9, 33.2],
-  "THROTTLE_GAIN_V": [458,  502,  403,  426,  512,  667,  872, 1105, 1233, 1450, 1457, 1457, 1727],
+  # The low end raised 10%, fading out by 17.8 m/s: launches behind a lead delivered 82-98% of a positive request below
+  # 15 m/s on the flat (routes 44-4a), where the bottom of the fit runs short.
+  "THROTTLE_GAIN_V": [504,  552,  443,  469,  563,  734,  916, 1105, 1233, 1450, 1457, 1457, 1727],
   "THROTTLE_CHORD_MIN": 0.15,  # m/s^2, the least request a chord up from the open floor spans
   # The shut's band where there is no bias to bridge, below 2 m/s: under BRAKE_DEADBAND / BRAKE_GAIN, so the open throttle
   # never brakes, and wide enough that a crawl's request, which rests on A_COAST, cannot flip the throttle every frame.
